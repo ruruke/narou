@@ -6,6 +6,7 @@
 
 require "fileutils"
 require "stringio"
+require_relative "aozoraepub3"
 require_relative "novelsetting"
 require_relative "inspector"
 require_relative "illustration"
@@ -85,6 +86,7 @@ class NovelConverter
     }
   end
 
+<<<<<<< HEAD
   DAKUTEN_FROM = ["vertical_font_with_dakuten.css", "DMincho.ttf"]
   DAKUTEN_TO = ["template/OPS/css_custom/vertical_font.css", "template/OPS/fonts/DMincho.ttf"]
   DAKUTEN_ERB = [true, false]
@@ -116,6 +118,8 @@ class NovelConverter
     FileUtils.remove(File.join(aozora_dir, DAKUTEN_TO[1]))
   end
 
+=======
+>>>>>>> 325a65d (電書協フォーマットへの対応)
   #
   # AozoraEpub3でEPUBファイル作成
   #
@@ -127,6 +131,9 @@ class NovelConverter
   # 返り値：正常終了 :success、エラー終了 :error、AozoraEpub3が見つからなかった nil
   #
   def self.txt_to_epub(filename, dst_dir: nil, device: nil, verbose: false, yokogaki: false, use_dakuten_font: false, stream_io: $stdout2)
+    # AozoraEpub3のリソース更新
+    AozoraEpub3.update_resources(yokogaki, use_dakuten_font)
+
     abs_srcpath = File.expand_path(filename)
     src_dir = File.dirname(abs_srcpath)
 
@@ -179,7 +186,7 @@ class NovelConverter
     if Helper.os_windows?
       command = "cmd /c #{command}".encode(Encoding::Windows_31J)
     end
-    activate_dakuten_font_files if use_dakuten_font
+
     stream_io.print "AozoraEpub3でEPUBに変換しています"
     begin
       res = Helper::AsyncCommand.exec(command) do
@@ -187,7 +194,6 @@ class NovelConverter
       end
     ensure
       Dir.chdir(pwd)
-      inactivate_dakuten_font_files if use_dakuten_font
     end
 
     # AozoraEpub3はエラーだとしてもexitコードは0なので、
