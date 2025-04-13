@@ -118,8 +118,6 @@ class NovelConverter
     FileUtils.remove(File.join(aozora_dir, DAKUTEN_TO[1]))
   end
 
-=======
->>>>>>> 325a65d (電書協フォーマットへの対応)
   #
   # AozoraEpub3でEPUBファイル作成
   #
