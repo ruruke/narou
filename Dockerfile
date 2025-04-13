@@ -14,13 +14,10 @@ RUN apt-get update && apt-get install -y \
     gnupg \
     software-properties-common \
     vim \
-    # ヘッドレスブラウザとその依存関係
-    chromium \
-    chromium-driver \
     xvfb \
     && rm -rf /var/lib/apt/lists/*
 
-# OpenJDK 21をインストール (Java 11から21に変更)
+# OpenJDK 21をインストール
 RUN apt-get update && \
     mkdir -p /etc/apt/keyrings && \
     wget -O - https://packages.adoptium.net/artifactory/api/gpg/key/public | tee /etc/apt/keyrings/adoptium.asc && \
@@ -28,7 +25,6 @@ RUN apt-get update && \
     apt-get update && \
     apt-get install -y temurin-21-jre \
     && rm -rf /var/lib/apt/lists/*
-
 
 # Javaバージョンを確認
 RUN java -version
@@ -55,15 +51,20 @@ RUN mkdir -p /app/aozoraepub3 && \
     curl -L https://github.com/kyukyunyorituryo/AozoraEpub3/releases/download/v1.1.1b30Q/AozoraEpub3-1.1.1b30Q.zip -o /tmp/aozoraepub3.zip && \
     unzip /tmp/aozoraepub3.zip -d /tmp/aozoraepub3_temp && \
     cp -R /tmp/aozoraepub3_temp/* /app/aozoraepub3/ && \
+    # 初期データのバックアップを作成
+    mkdir -p /tmp/aozoraepub3_initial && \
+    cp -R /app/aozoraepub3/* /tmp/aozoraepub3_initial/ && \
     rm -rf /tmp/aozoraepub3.zip /tmp/aozoraepub3_temp && \
     chmod +x /app/aozoraepub3/*.sh || true
 
-# 小説データ用のボリュームを作成
-VOLUME ["/app/novels"]
-
-# Narou.rbの初期化
+# Narou.rbの初期化（イメージビルド時のみ）
 RUN narou init -p /app/aozoraepub3
 RUN narou setting server-ws-add-accepted-domains="*"
+
+# エントリポイントスクリプトを追加
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]
 
 # Web UIポート
 EXPOSE 33000
