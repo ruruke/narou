@@ -53,7 +53,13 @@ module Command
         else
           puts "(何かキーを押して下さい。サーバ起動後ブラウザが立ち上がります)"
         end
-        $stdin.getch
+        if ENV['DOCKER_ENV'] == 'true'
+          # Docker環境では改行文字を返すなど、単純な応答をシミュレート
+        else
+          # 通常の環境では getch を使用
+          $stdin.getch
+        end
+
         setting["already-server-boot"] = true
         setting.save
       end

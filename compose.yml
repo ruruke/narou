@@ -3,11 +3,24 @@ version: '3'
 services:
   narou:
     build: .
-    container_name: narou
+    # ホストからは直接アクセスしないためポート公開不要
+    # ports:
+    #   - "33000:33000"
+    #   - "33001:33001"
+    networks:
+      - narou-net
+
+  nginx:
+    image: nginx:alpine
     ports:
-      - "33000:33000"
+       - "33000:33000"
+       - "33001:33001"
     volumes:
-      - ./novels:/novels
-    environment:
-      - TZ=Asia/Tokyo
-    restart: unless-stopped
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf
+    depends_on:
+      - narou
+    networks:
+      - narou-net
+
+networks:
+  narou-net:
