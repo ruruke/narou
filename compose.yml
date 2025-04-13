@@ -1,0 +1,13 @@
+version: '3'
+
+services:
+  narou:
+    build: .
+    container_name: narou
+    ports:
+      - "33000:33000"
+    volumes:
+      - ./novels:/novels
+    environment:
+      - TZ=Asia/Tokyo
+    restart: unless-stopped
