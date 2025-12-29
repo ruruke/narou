@@ -7,9 +7,12 @@
 require "yaml"
 require "fileutils"
 require "ostruct"
+require "cgi"
+require "digest"
 require_relative "narou"
 require_relative "helper"
 require_relative "sitesetting"
+require_relative "novelsetting"
 require_relative "template"
 require_relative "progressbar"
 require_relative "database"
@@ -17,6 +20,109 @@ require_relative "inventory"
 require_relative "eventable"
 require_relative "html"
 require_relative "input"
+
+# --- Sanitize shim (fragment only) ---
+unless defined?(Sanitize)
+  module Sanitize
+    module_function
+
+    WHITESPACE = /\s+/.freeze
+    SCRIPT_CLOSE = "</script"
+    STYLE_CLOSE = "</style"
+    COMMENT_CLOSE = "-->"
+
+    def fragment(html)
+      return "" if html.nil?
+      input = html.to_s
+      return "" if input.empty?
+
+      fallback_fragment(input)
+    end
+
+    def fallback_fragment(input)
+      result = +""
+      lower = input.downcase
+      index = 0
+      skip_until = nil
+
+      while index < input.length
+        if skip_until
+          closing = lower.index(skip_until, index)
+          break unless closing
+          close_gt = input.index(">", closing + skip_until.length)
+          index = close_gt ? close_gt + 1 : closing + skip_until.length
+          skip_until = nil
+          next
+        end
+
+        if input.getbyte(index) == 60 # "<"
+          if lower[index, 4] == "<!--"
+            closing = lower.index(COMMENT_CLOSE, index + 4)
+            break unless closing
+            index = closing + COMMENT_CLOSE.length
+            next
+          end
+
+          close = input.index(">", index + 1)
+          break unless close
+          tag = lower[(index + 1)...close].lstrip
+          tag_name = extract_tag_name(tag)
+          skip_until =
+            case tag_name
+            when "script"
+              SCRIPT_CLOSE
+            when "style"
+              STYLE_CLOSE
+            end
+          index = close + 1
+          next
+        end
+
+        result << input[index]
+        index += 1
+      end
+
+      normalize_text(result)
+    end
+    private_class_method :fallback_fragment
+
+    def extract_tag_name(tag)
+      idx = 0
+      len = tag.length
+      while idx < len
+        byte = tag.getbyte(idx)
+        if byte == 47 || byte <= 32 # '/' or whitespace
+          idx += 1
+          next
+        elsif byte >= 97 && byte <= 122 # a-z
+          start = idx
+          idx += 1
+          while idx < len
+            b = tag.getbyte(idx)
+            break unless (b >= 97 && b <= 122) || (b >= 48 && b <= 57) || b == 45
+            idx += 1
+          end
+          return tag.slice(start, idx - start)
+        else
+          break
+        end
+      end
+      nil
+    end
+    private_class_method :extract_tag_name
+
+    def normalize_text(text)
+      buffer = text.to_s
+      buffer.gsub!(/&nbsp;|&#160;/i, " ")
+      unescaped = ::CGI.unescapeHTML(buffer)
+      unescaped.tr!("\u00A0", " ")
+      unescaped.gsub!(WHITESPACE, " ")
+      unescaped.strip
+    end
+    private_class_method :normalize_text
+  end
+end
+# --- /Sanitize shim ---
 
 #
 # 小説サイトからのダウンロード
@@ -114,8 +220,9 @@ class Downloader
     subdirectory = use_subdirectory ? create_subdirecotry_name(file_title) : ""
     path = Database.archive_root_path.join(data["sitename"], subdirectory, file_title)
     return path if path.exist?
-    @@database.delete(id)
-    @@database.save_database
+    database.delete(id)
+    database.save_database
+    clear_section_hash_cache(id)
     error "#{path} が見つかりません。\n" \
           "保存フォルダが消去されていたため、データベースのインデックスを削除しました。"
     nil
@@ -139,17 +246,17 @@ class Downloader
       setting = SiteSetting.find(target)
       if setting
         toc_url = setting["toc_url"]
-        return @@database.get_data_by_toc_url(toc_url, setting)
+        return database.get_data_by_toc_url(toc_url, setting)
       end
     when :ncode
-      @@database.each_value do |data|
+      database.each_value do |data|
         return data if data["toc_url"] =~ %r!#{target}/$!
       end
     when :id
-      data = @@database[target.to_i]
+      data = database[target.to_i]
       return data if data
     when :other
-      data = @@database.get_data("title", target)
+      data = database.get_data("title", target)
       return data if data
     end
     nil
@@ -159,7 +266,11 @@ class Downloader
   # toc 読込
   #
   def self.get_toc_data(archive_path)
-    YAML.unsafe_load_file(File.join(archive_path, TOC_FILE_NAME))
+    path = File.join(archive_path, TOC_FILE_NAME)
+    YAML.unsafe_load_file(path)
+  rescue SystemCallError
+    # bootsnap on Windows can raise Errno::E01 errors, fallback to standard YAML
+    YAML.unsafe_load(File.read(path))
   end
 
   def self.get_toc_by_target(target)
@@ -179,17 +290,17 @@ class Downloader
       setting = SiteSetting.find(target)
       return setting["toc_url"] if setting
     when :ncode
-      @@database.each_value do |data|
+      database.each_value do |data|
         if data["toc_url"] =~ %r!#{target}/$!
           return data["toc_url"]
         end
       end
       return "#{SiteSetting.narou["top_url"]}/#{target}/"
     when :id
-      data = @@database[target.to_i]
+      data = database[target.to_i]
       return data["toc_url"] if data
     when :other
-      data = @@database.get_data("title", target)
+      data = database.get_data("title", target)
       return data["toc_url"] if data
     end
     nil
@@ -197,7 +308,7 @@ class Downloader
 
   def self.novel_exists?(target)
     id = get_id_by_target(target) or return nil
-    @@database.novel_exists?(id)
+    database.novel_exists?(id)
   end
 
   def self.remove_novel(target, with_file = false)
@@ -210,8 +321,9 @@ class Downloader
       # TOCは消しておかないと再DL時に古いデータがあると誤認する
       data_dir.join(TOC_FILE_NAME).delete
     end
-    @@database.delete(data["id"])
-    @@database.save_database
+    database.delete(data["id"])
+    database.save_database
+    clear_section_hash_cache(data["id"])
     data["title"]
   end
 
@@ -245,8 +357,23 @@ class Downloader
     name.strip
   end
 
-  if Narou.already_init?
-    @@database = Database.instance
+  SECTION_HASH_CACHE_NAME = "section_hash_cache"
+
+  def self.database
+    Database.instance
+  end
+
+  def self.section_hash_cache
+    @section_hash_cache ||= Inventory.load(SECTION_HASH_CACHE_NAME)
+  end
+
+  def self.clear_section_hash_cache(id)
+    cache = section_hash_cache
+    removed = cache.delete(id.to_s)
+    cache.save if removed
+    if defined?(NovelConverter) && NovelConverter.respond_to?(:clear_section_convert_cache)
+      NovelConverter.clear_section_convert_cache(id)
+    end
   end
 
   #
@@ -263,6 +390,7 @@ class Downloader
     @new_novel = record.!
     @from_download = options[:from_download]
     @section_download_cache = {}
+    @max_cache_size = 20  # セクションキャッシュの上限
     @download_wait_steps = Inventory.load("local_setting")["download.wait-steps"] || 0
     @download_use_subdirectory = use_subdirectory?
     if @setting["is_narou"] && (@download_wait_steps > 10 || @download_wait_steps == 0)
@@ -274,8 +402,69 @@ class Downloader
     initialize_wait_counter
   end
 
+  def section_hash_cache
+    self.class.section_hash_cache
+  end
+
+  def section_hash_bucket
+    section_hash_cache[@id.to_s] ||= {}
+  end
+
+  def cached_section_digest(relative_path)
+    section_hash_bucket[relative_path]
+  end
+
+  def ensure_cached_section_digest(relative_path)
+    digest = cached_section_digest(relative_path)
+    return digest if digest
+    data = load_novel_data(relative_path)
+    return nil unless data
+    digest = section_digest(data["element"])
+    store_section_digest(relative_path, digest)
+    digest
+  end
+
+  def store_section_digest(relative_path, digest)
+    bucket = section_hash_bucket
+    key = relative_path
+    normalized = digest&.to_s
+    if normalized.nil?
+      changed = bucket.delete(key)
+    else
+      changed = bucket[key] != normalized
+      bucket[key] = normalized
+    end
+    mark_section_hash_dirty if changed
+    normalized
+  end
+
+  def clear_section_digest(relative_path)
+    bucket = section_hash_bucket
+    changed = bucket.delete(relative_path)
+    mark_section_hash_dirty if changed
+    invalidate_section_convert_cache(relative_path)
+  end
+
+  def mark_section_hash_dirty
+    @section_hash_cache_dirty = true
+  end
+
+  def flush_section_hash_cache
+    return unless @section_hash_cache_dirty
+    section_hash_cache.save
+    @section_hash_cache_dirty = false
+  end
+
+  def section_digest(element)
+    Digest::SHA256.hexdigest(element.to_s)
+  end
+  def invalidate_section_convert_cache(relative_path)
+    return unless relative_path.start_with?("#{SECTION_SAVE_DIR_NAME}/")
+    return unless defined?(NovelConverter) && NovelConverter.respond_to?(:clear_section_convert_cache_entry)
+    NovelConverter.clear_section_convert_cache_entry(@id, relative_path)
+  end
   def database
-    @@database
+    self.class.database
   end
 
   def record
@@ -415,6 +604,20 @@ class Downloader
       else
         :none
       end
+
+    auto_add_tags = Inventory.load("local_setting")["auto-add-tags"]
+    if @setting["tag"] && auto_add_tags
+      clean_tag = Sanitize.fragment(@setting["tag"]).gsub(/キーワードが設定されていません/, '').gsub(/キーワード/, '').gsub(/\"?\(\?\.\+\?\)\"?/, '').gsub(/\(\?\<?[^)]*\)/, '').strip
+      if clean_tag.length > 0
+        new_tags = clean_tag.split(/[ 　]+/).uniq
+        old_tags = (record && record["tags"]) ? record["tags"] : []
+        if (new_tags - old_tags).any?
+          @stream.puts "#{id_and_title} のタグが更新されています"
+          update_database
+          return_status = :ok if return_status == :none
+        end
+      end
+    end
 
     record["general_all_no"] = latest_toc_subtitles.size
 
@@ -627,6 +830,18 @@ class Downloader
       "length" => novel_length,
       "suspend" => suspend
     }
+    auto_add_tags = Inventory.load("local_setting")["auto-add-tags"]
+    if @setting["tag"] && auto_add_tags
+      clean_tag = Sanitize.fragment(@setting["tag"]).gsub(/キーワード/, '').gsub(/\"?\(\?\.\+\?\)\"?/, '').gsub(/\(\?\<?[^)]*\)/, '').strip
+      if clean_tag.length > 0
+        tags = clean_tag.split(/[ 　]+/)
+        if record && record["tags"]
+          old_tags = record["tags"]
+          tags.concat(old_tags)
+        end
+        data["tags"] = tags.uniq
+      end
+    end
     if record
       database[@id].merge!(data)
     else
@@ -723,6 +938,7 @@ class Downloader
     toc_url = @setting["toc_url"]
     return nil unless toc_url
     max_retry = 5
+    retry_count = LIMIT_TO_RETRY_NETWORK
     toc_source = ""
     cookie = @setting["cookie"] || ""
     open_uri_options = make_open_uri_options("Cookie" => cookie, allow_redirections: :safe)
@@ -755,6 +971,28 @@ class Downloader
       else
         raise
       end
+    rescue OpenURI::HTTPError, Errno::ECONNRESET, Errno::ECONNABORTED, Errno::ETIMEDOUT, Net::OpenTimeout, IO::TimeoutError, SocketError => e
+      case e.message
+      when /^503/
+        @stream&.error "server message: #{e.message}"
+        display_hint if @stream
+        raise SuspendDownload
+      when /^404/
+        # 404は上位のget_latest_table_of_contentsで処理させるため、そのまま再raise
+        raise e
+      else
+        if retry_count == 0
+          @stream&.error "上限までリトライしましたが目次がダウンロード出来ませんでした"
+          raise SuspendDownload
+        end
+        retry_count -= 1
+        @stream&.puts <<~MSG
+          server message: #{e.message}
+          リトライ待機中...
+        MSG
+        sleep(WAIT_TIME_TO_RETRY_NETWORK)
+        retry
+      end
     end
     toc_source
   end
@@ -780,6 +1018,7 @@ class Downloader
       story_html.strip_decoration_tag = true
       @setting["story"] = story_html.to_aozora
     end
+    @setting.multi_match(toc_source, "tags")
     @setting["info"] = info
     replace_external_properties_of_setting
 
@@ -801,7 +1040,7 @@ class Downloader
       "subtitles" => subtitles
     }
     toc_objects
-  rescue OpenURI::HTTPError, Errno::ECONNRESET, Errno::ETIMEDOUT, Net::OpenTimeout, IO::TimeoutError => e
+  rescue OpenURI::HTTPError, Errno::ECONNRESET, Errno::ECONNABORTED, Errno::ETIMEDOUT, Net::OpenTimeout, IO::TimeoutError, SocketError => e
     raise if through_error   # エラー処理はしなくていいからそのまま例外を受け取りたい時用
     if e.message.include?("404")
       @stream.error "小説が削除されているか非公開な可能性があります"
@@ -867,7 +1106,7 @@ class Downloader
   #
   def update_body_check(old_subtitles, latest_subtitles)
     strong_update = Inventory.load("local_setting")["update.strong"]
-    latest_subtitles.select do |latest|
+    result = latest_subtitles.select do |latest|
       index = latest["index"]
       index_in_old_toc = __search_index_in_subtitles(old_subtitles, index)
       next true unless index_in_old_toc
@@ -934,6 +1173,9 @@ class Downloader
         latest_subdate > old_subdate
       end
     end
+    result
+  ensure
+    flush_section_hash_cache
   end
 
   #
@@ -1073,15 +1315,22 @@ class Downloader
       @stream.puts
     end
     remove_cache_dir unless save_least_one
+  ensure
+    flush_section_hash_cache
   end
 
   #
   # すでに保存されている内容とDLした内容が違うかどうか
   #
   def different_section?(old_relative_path, new_subtitle_info)
-    path = get_novel_data_dir.join(old_relative_path)
-    return true unless path.exist?
-    YAML.unsafe_load_file(path)["element"] != new_subtitle_info["element"]
+    new_digest = section_digest(new_subtitle_info["element"])
+    cached_digest = cached_section_digest(old_relative_path)
+    return cached_digest != new_digest if cached_digest
+
+    existing_digest = ensure_cached_section_digest(old_relative_path)
+    return true unless existing_digest
+
+    existing_digest != new_digest
   end
 
   #
@@ -1091,6 +1340,7 @@ class Downloader
     return if @nosave_diff
     path = get_novel_data_dir.join(relative_path)
     if path.exist? && @cache_dir
+      clear_section_digest(relative_path)
       FileUtils.mv(path, @cache_dir)
     end
   end
@@ -1119,6 +1369,10 @@ class Downloader
   def a_section_download(subtitle_info)
     index = subtitle_info["index"]
     return @section_download_cache[index] if @section_download_cache[index]
+    
+    # キャッシュサイズ制限をチェック
+    cleanup_cache_if_needed
+    
     sleep_for_download
     href = subtitle_info["href"]
     subtitle_url =
@@ -1138,6 +1392,25 @@ class Downloader
     subtitle_info["download_time"] = Time.now
     @section_download_cache[index] = element
     element
+  end
+
+  #
+  # セクションキャッシュのサイズ制限とクリーンアップ
+  #
+  def cleanup_cache_if_needed
+    return if @section_download_cache.size <= @max_cache_size
+    
+    # 古いエントリから削除（インデックスの小さいものから）
+    sorted_keys = @section_download_cache.keys.sort
+    keys_to_remove = sorted_keys.first(@section_download_cache.size - @max_cache_size + 1)
+    keys_to_remove.each { |key| @section_download_cache.delete(key) }
+  end
+
+  #
+  # Downloaderの完了時にキャッシュをクリア
+  #
+  def cleanup
+    @section_download_cache.clear if @section_download_cache
   end
 
   def display_hint
@@ -1174,7 +1447,7 @@ class Downloader
       URI.open(url, "r:#{@setting["encoding"]}", open_uri_options) do |fp|
         raw = Helper.pretreatment_source(fp.read, @setting["encoding"])
       end
-    rescue OpenURI::HTTPError, Errno::ECONNRESET, Errno::ETIMEDOUT, Net::OpenTimeout, IO::TimeoutError => e
+    rescue OpenURI::HTTPError, Errno::ECONNRESET, Errno::ECONNABORTED, Errno::ETIMEDOUT, Net::OpenTimeout, IO::TimeoutError, SocketError => e
       case e.message
       when /^503/
         # 503 はアクセス規制やメンテ等でリトライしてもほぼ意味がないことが多いため一度で諦める
@@ -1301,6 +1574,7 @@ class Downloader
       FileUtils.mkdir_p(dir_path)
     end
     File.write(path, YAML.dump(object))
+    update_section_hash_after_save(filename, object)
   end
 
   #
@@ -1309,6 +1583,18 @@ class Downloader
     YAML.unsafe_load_file(get_novel_data_dir.join(filename))
   rescue Errno::ENOENT
     nil
+  rescue SystemCallError => e
+    # bootsnap on Windows can raise Errno::E01 errors, fallback to standard YAML
+    path = get_novel_data_dir.join(filename)
+    return nil unless File.exist?(path)
+    YAML.unsafe_load(File.read(path))
+  end
+
+  def update_section_hash_after_save(filename, object)
+    return unless filename.start_with?("#{SECTION_SAVE_DIR_NAME}/")
+    return unless object.is_a?(Hash)
+    store_section_digest(filename, section_digest(object["element"]))
+    invalidate_section_convert_cache(filename)
   end
 
   #
@@ -1343,7 +1629,69 @@ class Downloader
   end
 
   def replace_external_properties_of_setting
-    @setting["title"] = @setting["title"].delete("\r\n")
-    @setting["author"] = @setting["author"].delete("\r\n")
+    @setting["title"]  = @setting["title"]&.delete("\r\n")  || ""
+    @setting["author"] = @setting["author"]&.delete("\r\n") || ""
   end
 end
+
+# ==== UTF-8 Hotfix: avoid "UTF-8 and ASCII-8BIT" clashes ====
+# このブロックは downloader.rb の最下部にそのまま追記してください。
+# 既存コードには手を入れず、戻り値の文字列だけを UTF-8 に正規化します。
+
+module Narou
+  module Utf8Hotfix
+    module_function
+    def utf8(v)
+      case v
+      when String
+        # BINARY(ASCII-8BIT) を含む可能性があるので強制的に UTF-8 + scrub
+        v.encoding == Encoding::UTF_8 ? v : v.dup.force_encoding(Encoding::UTF_8).scrub
+      when Array
+        v.map { |e| utf8(e) }
+      when Hash
+        # 値側を再帰的に正規化。キーはそのまま（シンボルや固定文字列想定）
+        v.transform_values { |e| utf8(e) }
+      else
+        v
+      end
+    end
+  end
+end
+
+if defined?(Narou::Downloader)
+  class Narou::Downloader
+    # get_latest_table_of_contents の戻り値を UTF-8 に正規化
+    if method_defined?(:get_latest_table_of_contents)
+      alias __orig_get_latest_table_of_contents get_latest_table_of_contents
+      def get_latest_table_of_contents(*args, **kwargs, &blk)
+        res = __orig_get_latest_table_of_contents(*args, **kwargs, &blk)
+        Narou::Utf8Hotfix.utf8(res)
+      end
+    end
+
+    # 念のため run_download の戻り値も正規化（TOC 以外の経路対策）
+    if method_defined?(:run_download)
+      alias __orig_run_download run_download
+      def run_download(*args, **kwargs, &blk)
+        res = __orig_run_download(*args, **kwargs, &blk)
+        Narou::Utf8Hotfix.utf8(res)
+      end
+    end
+  end
+
+  private
+
+  # 互換: 旧来の make_open_uri_options を Downloader 側で吸収
+  # 呼び出し側: make_open_uri_options("Cookie" => cookie, allow_redirections: :safe)
+  def make_open_uri_options(headers = {}, allow_redirections: :safe)
+    if defined?(Helper) && Helper.respond_to?(:make_open_uri_options)
+      return Helper.make_open_uri_options(headers, allow_redirections: allow_redirections)
+    end
+    # 最低限のフォールバック
+    opts = { allow_redirections: allow_redirections }
+    headers.each { |k, v| opts[k] = v }
+    opts
+  end
+
+end
+# ==== /UTF-8 Hotfix ====

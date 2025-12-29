@@ -10,7 +10,11 @@ append_title_to_folder_name: yes
 title_strip_pattern: null
 cookie: over18=yes
 sitename: *name
+<<<<<<< HEAD
 version: 2.1
+=======
+version: 2.2
+>>>>>>> upstream/develop
 
 # ------------------------------------------------------------
 # 目次取得設定
@@ -61,7 +65,14 @@ narou_api_url: https://api.syosetu.com/novelapi/api/
 novel_info_url: \\k<top_url>/novelview/infotop/ncode/\\k<ncode>/
 
 # タイトル
+<<<<<<< HEAD
 t: <h1 class="p-infotop-title"><a href=".+?">(?<title>.+?)</a></h1>
+=======
+t: |-
+  <h1 class="p-infotop-title">
+  <a href=".+?">(?<title>.+?)</a>
+  </h1>
+>>>>>>> upstream/develop
 
 # novel_type 小説種別
 nt: <span class="p-infotop-type__type(?:.*?)">(?<novel_type>.+?)</span>
@@ -104,3 +115,11 @@ w: |-
 l: |-
   <dt class="p-infotop-data__title">文字数</dt>
   <dd class="p-infotop-data__value">(?<length>.+?)文字</dd>
+<<<<<<< HEAD
+=======
+
+# tag キーワード
+tags: |-
+  <dt class="p-infotop-data__title">\s*キーワード\s*</dt>\s*<dd class="p-infotop-data__value">\s*
+  (?<tag>(?:(?!キーワードが設定されていません)[\s\S])*?)\s*</dd>
+>>>>>>> upstream/develop

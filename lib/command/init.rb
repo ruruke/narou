@@ -7,6 +7,7 @@
 require_relative "../aozoraepub3"
 require_relative "../inventory"
 require_relative "../commandbase"
+require_relative "../tty_helper"
 
 module Command
   class Init < CommandBase
@@ -93,16 +94,31 @@ module Command
         puts "<bold><red>#{"!!!WARNING!!!".center(70)}</red></bold>".termcolor
         puts "AozoraEpub3の構成ファイルを書き換えます。narouコマンド用に別途新規インストールしておくことをオススメします"
       end
+
+      path = nil
       if @options["aozora_dirname"]
         path = normalize_aozoraepub3_path(@options["aozora_dirname"])
         print "\n<bold><green>指定されたフォルダにAozoraEpub3がありません。</green></bold>\n".termcolor unless path
       end
-      aozora_path = path || ask_aozoraepub3_path
+
+      # 非対話（CI/rspec 等）では入力待ちしない：既存設定があれば採用、なければスキップ
+      aozora_path =
+        if path
+          path
+        elsif TTYHelper.non_interactive?
+          @global_setting["aozoraepub3dir"]
+        else
+          ask_aozoraepub3_path
+        end
+
       unless aozora_path
         puts "設定をスキップしました。あとで " + "<bold><yellow>narou init</yellow></bold>".termcolor + " で再度設定出来ます"
         return
       end
-      line_height = @options["line_height"] || ask_line_height
+
+      line_height =
+        @options["line_height"] || (TTYHelper.non_interactive? ? Narou.line_height(default: 1.8) : ask_line_height)
+
       puts
       @global_setting["aozoraepub3dir"] = aozora_path
       @global_setting["line-height"] = line_height
@@ -123,6 +139,8 @@ module Command
     end
 
     def ask_aozoraepub3_path
+      # 非対話環境では入力を読まない
+      return nil if TTYHelper.non_interactive?
       puts
       print "<bold><green>AozoraEpub3のあるフォルダを入力して下さい:</green></bold>\n(未入力でスキップ".termcolor
       if @global_setting["aozoraepub3dir"]
@@ -141,6 +159,8 @@ module Command
     end
 
     def ask_line_height
+      # 非対話環境ではデフォルトを返す（安全側）
+      return Narou.line_height(default: 1.8) if TTYHelper.non_interactive?
       # 後方互換のために未設定時の line_height デフォルトは 1.6 だが、
       # オススメは 1.8 なので入力時のデフォルトは 1.8 にする
       line_height = Narou.line_height(default: 1.8)
